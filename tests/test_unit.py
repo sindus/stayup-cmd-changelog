@@ -181,7 +181,7 @@ class TestInitDb:
     def test_executes_ddl_and_commits(self):
         conn, cursor = make_conn_mock()
         init_db(conn)
-        assert cursor.execute.call_count == 2  # DDL + rename provider_id migration
+        assert cursor.execute.call_count == 3  # DDL + rename provider_id migration + add type column migration
         conn.commit.assert_called_once()
 
 
@@ -215,6 +215,13 @@ class TestGetRepositories:
         cursor.fetchall.return_value = []
         result = get_repositories(conn)
         assert result == []
+
+    def test_filters_by_changelog_type(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchall.return_value = []
+        get_repositories(conn)
+        sql = cursor.execute.call_args[0][0]
+        assert "type = 'changelog'" in sql
 
 
 class TestGetLatestChangelog:

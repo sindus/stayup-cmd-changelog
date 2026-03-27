@@ -40,6 +40,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS repository (
     id          SERIAL PRIMARY KEY,
     url         TEXT NOT NULL UNIQUE,
+    type        TEXT NOT NULL DEFAULT 'changelog',
     config      JSONB NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -107,6 +108,17 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
                 END IF;
             END $$;
             """)
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'repository' AND column_name = 'type'
+                ) THEN
+                    ALTER TABLE repository ADD COLUMN type TEXT NOT NULL DEFAULT 'changelog';
+                END IF;
+            END $$;
+            """)
     conn.commit()
 
 
@@ -128,9 +140,9 @@ def upsert_repository(conn: psycopg2.extensions.connection, url: str) -> int:
 
 
 def get_repositories(conn: psycopg2.extensions.connection) -> list[tuple[int, str]]:
-    """Return all tracked repositories as a list of (id, url) tuples."""
+    """Return all tracked repositories of type 'changelog' as a list of (id, url) tuples."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id, url FROM repository ORDER BY id")
+        cur.execute("SELECT id, url FROM repository WHERE type = 'changelog' ORDER BY id")
         return cur.fetchall()
 
 
