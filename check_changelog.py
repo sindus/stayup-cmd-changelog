@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS repository (
 
 CREATE TABLE IF NOT EXISTS connector_changelog (
     id              SERIAL PRIMARY KEY,
-    provider_id     INTEGER NOT NULL REFERENCES repository(id),
+    repository_id     INTEGER NOT NULL REFERENCES repository(id),
     version         TEXT,
     content         TEXT NOT NULL,
     datetime        TIMESTAMPTZ,
@@ -96,6 +96,17 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
     """Create tables if they don't exist and apply pending migrations."""
     with conn.cursor() as cur:
         cur.execute(DDL)
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'connector_changelog' AND column_name = 'provider_id'
+                ) THEN
+                    ALTER TABLE connector_changelog RENAME COLUMN provider_id TO repository_id;
+                END IF;
+            END $$;
+            """)
     conn.commit()
 
 
@@ -132,7 +143,7 @@ def get_latest_changelog(conn: psycopg2.extensions.connection, repository_id: in
         cur.execute(
             """
             SELECT version, content FROM connector_changelog
-            WHERE provider_id = %s AND success = TRUE
+            WHERE repository_id = %s AND success = TRUE
             ORDER BY executed_at DESC
             LIMIT 1
             """,
@@ -148,7 +159,7 @@ def get_saved_versions(conn: psycopg2.extensions.connection, repository_id: int)
         cur.execute(
             """
             SELECT version FROM connector_changelog
-            WHERE provider_id = %s AND version IS NOT NULL
+            WHERE repository_id = %s AND version IS NOT NULL
             """,
             (repository_id,),
         )
@@ -167,7 +178,7 @@ def save_changelog(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO connector_changelog (provider_id, version, content, datetime, executed_at, success)
+            INSERT INTO connector_changelog (repository_id, version, content, datetime, executed_at, success)
             VALUES (%s, %s, %s, %s, %s, TRUE)
             """,
             (repository_id, version, content, changelog_date, executed_at),

@@ -130,7 +130,10 @@ class TestSaveChangelogFunctional:
         save_changelog(db_conn, repo_id, "v1.0.0", "release notes", None, executed_at)
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT version, content, success FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute(
+                "SELECT version, content, success FROM connector_changelog WHERE repository_id = %s",
+                (repo_id,),
+            )
             row = cur.fetchone()
         assert row[0] == "v1.0.0"
         assert row[1] == "release notes"
@@ -141,7 +144,7 @@ class TestSaveChangelogFunctional:
         save_changelog(db_conn, repo_id, None, "## 1.0.0\n- init", None, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT version, content FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT version, content FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             row = cur.fetchone()
         assert row[0] is None
         assert "1.0.0" in row[1]
@@ -152,7 +155,7 @@ class TestSaveChangelogFunctional:
         save_changelog(db_conn, repo_id, None, "content", changelog_date, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT datetime FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT datetime FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             row = cur.fetchone()
         assert row[0].replace(tzinfo=timezone.utc) == changelog_date
 
@@ -170,7 +173,7 @@ class TestCleanupOldChangelogsFunctional:
 
         sql = (
             "INSERT INTO connector_changelog"
-            " (provider_id, version, content, executed_at, success)"
+            " (repository_id, version, content, executed_at, success)"
             " VALUES (%s, %s, %s, %s, TRUE)"
         )
         with db_conn.cursor() as cur:
@@ -181,7 +184,7 @@ class TestCleanupOldChangelogsFunctional:
         cleanup_old_changelogs(db_conn)
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT version FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT version FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             rows = cur.fetchall()
         versions = [r[0] for r in rows]
         assert "v1.0.0" not in versions
@@ -196,7 +199,7 @@ class TestCleanupOldChangelogsFunctional:
         cleanup_old_changelogs(db_conn)
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 5
 
@@ -241,7 +244,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT version, success FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT version, success FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             row = cur.fetchone()
         assert row[0] == "v1.0.0"
         assert row[1] is True
@@ -263,7 +266,7 @@ class TestEndToEnd:
 
         with db_conn.cursor() as cur:
             cur.execute(
-                "SELECT version FROM connector_changelog WHERE provider_id = %s ORDER BY executed_at DESC LIMIT 1",
+                "SELECT version FROM connector_changelog WHERE repository_id = %s ORDER BY executed_at DESC LIMIT 1",
                 (repo_id,),
             )
             row = cur.fetchone()
@@ -280,7 +283,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 1
 
@@ -303,7 +306,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 4  # initial + 3 new
 
@@ -324,7 +327,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 1 + MAX_ITERATIONS  # initial + cap
 
@@ -336,7 +339,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT content, version FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT content, version FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             row = cur.fetchone()
         assert "1.0.0" in row[0]
         assert row[1] is None  # no version for file-based changelogs
@@ -364,7 +367,7 @@ class TestEndToEnd:
         process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 1
 
