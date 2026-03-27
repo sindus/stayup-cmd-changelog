@@ -108,17 +108,6 @@ def init_db(conn: psycopg2.extensions.connection) -> None:
                 END IF;
             END $$;
             """)
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'repository' AND column_name = 'type'
-                ) THEN
-                    ALTER TABLE repository ADD COLUMN type TEXT NOT NULL DEFAULT 'changelog';
-                END IF;
-            END $$;
-            """)
     conn.commit()
 
 
