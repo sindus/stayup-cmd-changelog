@@ -293,7 +293,7 @@ class TestEndToEnd:
         mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
         process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
 
-        # 3 new releases since last run
+        # 3 new releases since last run (under the cap of 5)
         mock_releases.return_value = [
             ("v1.3.0", "- v1.3", datetime.now(tz=timezone.utc)),
             ("v1.2.0", "- v1.2", datetime.now(tz=timezone.utc)),
@@ -306,6 +306,27 @@ class TestEndToEnd:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
             count = cur.fetchone()[0]
         assert count == 4  # initial + 3 new
+
+    @patch("check_changelog.get_releases")
+    def test_process_repo_capped_at_max_iterations(self, mock_releases, db_conn):
+        """More than MAX_ITERATIONS new releases — only MAX_ITERATIONS are saved."""
+        from check_changelog import MAX_ITERATIONS
+
+        repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
+        executed_at = datetime.now(tz=timezone.utc)
+
+        mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
+        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
+
+        # More new releases than MAX_ITERATIONS
+        new_releases = [(f"v2.{i}.0", f"- v2.{i}", datetime.now(tz=timezone.utc)) for i in range(MAX_ITERATIONS + 2)]
+        mock_releases.return_value = new_releases + [("v1.0.0", "- Initial", executed_at)]
+        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            count = cur.fetchone()[0]
+        assert count == 1 + MAX_ITERATIONS  # initial + cap
 
     @patch("check_changelog.get_releases")
     def test_process_repo_fallback_to_file(self, mock_releases, db_conn, local_git_repo):
@@ -331,6 +352,21 @@ class TestEndToEnd:
             cur.execute("SELECT error FROM log WHERE repository_id = %s", (repo_id,))
             row = cur.fetchone()
         assert "API timeout" in row[0]
+
+    @patch("check_changelog.get_releases")
+    def test_process_repo_no_insert_when_file_unchanged(self, mock_releases, db_conn, local_git_repo):
+        """File-based repo with unchanged content — no new entry inserted."""
+        mock_releases.return_value = []
+        repo_id = upsert_repository(db_conn, str(local_git_repo))
+        executed_at = datetime.now(tz=timezone.utc)
+
+        process_repo(db_conn, repo_id, str(local_git_repo), executed_at)
+        process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
+
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            count = cur.fetchone()[0]
+        assert count == 1
 
     def test_clone_invalid_url_raises(self, tmp_path):
         with pytest.raises(RuntimeError, match="Clone failed"):

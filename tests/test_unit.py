@@ -10,7 +10,9 @@ from check_changelog import (
     clone_repo,
     find_changelog,
     get_changelog_git_date,
+    get_latest_changelog,
     get_releases,
+    get_repositories,
     get_saved_versions,
     init_db,
     parse_github_owner_repo,
@@ -199,6 +201,36 @@ class TestUpsertRepository:
         upsert_repository(conn, "https://github.com/user/repo")
         params = cursor.execute.call_args[0][1]
         assert params == ("https://github.com/user/repo",)
+
+
+class TestGetRepositories:
+    def test_returns_list_of_tuples(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchall.return_value = [(1, "https://github.com/a/b"), (2, "https://github.com/c/d")]
+        result = get_repositories(conn)
+        assert result == [(1, "https://github.com/a/b"), (2, "https://github.com/c/d")]
+
+    def test_returns_empty_list_when_no_repos(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchall.return_value = []
+        result = get_repositories(conn)
+        assert result == []
+
+
+class TestGetLatestChangelog:
+    def test_returns_version_and_content_when_found(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchone.return_value = ("v1.0.0", "release notes")
+        version, content = get_latest_changelog(conn, 1)
+        assert version == "v1.0.0"
+        assert content == "release notes"
+
+    def test_returns_none_none_when_no_entry(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchone.return_value = None
+        version, content = get_latest_changelog(conn, 1)
+        assert version is None
+        assert content is None
 
 
 class TestGetSavedVersions:
