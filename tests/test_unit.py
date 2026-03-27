@@ -8,10 +8,10 @@ import pytest
 from check_changelog import (
     cleanup_old_changelogs,
     clone_repo,
-    compute_diff,
     find_changelog,
     get_changelog_git_date,
-    get_latest_release,
+    get_releases,
+    get_saved_versions,
     init_db,
     parse_github_owner_repo,
     save_changelog,
@@ -102,79 +102,64 @@ class TestGetChangelogGitDate:
 
 
 # ---------------------------------------------------------------------------
-# get_latest_release
+# get_releases
 # ---------------------------------------------------------------------------
 
 
-class TestGetLatestRelease:
+class TestGetReleases:
     @patch("check_changelog.requests.get")
-    def test_returns_release_data(self, mock_get):
+    def test_returns_list_of_releases(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {
-                "tag_name": "v1.2.3",
-                "body": "- Fix bug\n- Add feature",
-                "published_at": "2024-06-15T12:00:00Z",
-            },
+            json=lambda: [
+                {"tag_name": "v1.2.3", "body": "- Fix bug", "published_at": "2024-06-15T12:00:00Z"},
+                {"tag_name": "v1.2.2", "body": "- Previous", "published_at": "2024-05-01T00:00:00Z"},
+            ],
         )
-        tag, body, date = get_latest_release("https://github.com/user/repo")
-        assert tag == "v1.2.3"
-        assert body == "- Fix bug\n- Add feature"
-        assert date == datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        releases = get_releases("https://github.com/user/repo")
+        assert len(releases) == 2
+        assert releases[0][0] == "v1.2.3"
+        assert releases[0][1] == "- Fix bug"
+        assert releases[1][0] == "v1.2.2"
 
     @patch("check_changelog.requests.get")
-    def test_returns_none_on_404(self, mock_get):
+    def test_returns_empty_list_on_404(self, mock_get):
         mock_get.return_value = MagicMock(status_code=404)
-        result = get_latest_release("https://github.com/user/repo")
-        assert result is None
+        result = get_releases("https://github.com/user/repo")
+        assert result == []
+
+    @patch("check_changelog.requests.get")
+    def test_returns_empty_list_when_no_releases(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: [])
+        result = get_releases("https://github.com/user/repo")
+        assert result == []
 
     @patch("check_changelog.requests.get")
     def test_empty_body_returns_empty_string(self, mock_get):
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {
-                "tag_name": "v1.0.0",
-                "body": None,
-                "published_at": "2024-01-01T00:00:00Z",
-            },
+            json=lambda: [{"tag_name": "v1.0.0", "body": None, "published_at": "2024-01-01T00:00:00Z"}],
         )
-        _, body, _ = get_latest_release("https://github.com/user/repo")
-        assert body == ""
+        releases = get_releases("https://github.com/user/repo")
+        assert releases[0][1] == ""
 
     @patch("check_changelog.requests.get")
     def test_sends_token_header_when_set(self, mock_get, monkeypatch):
         monkeypatch.setenv("GITHUB_TOKEN", "mytoken")
         mock_get.return_value = MagicMock(
             status_code=200,
-            json=lambda: {
-                "tag_name": "v1.0.0",
-                "body": "content",
-                "published_at": "2024-01-01T00:00:00Z",
-            },
+            json=lambda: [{"tag_name": "v1.0.0", "body": "content", "published_at": "2024-01-01T00:00:00Z"}],
         )
-        get_latest_release("https://github.com/user/repo")
+        get_releases("https://github.com/user/repo")
         headers = mock_get.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer mytoken"
 
-
-# ---------------------------------------------------------------------------
-# compute_diff
-# ---------------------------------------------------------------------------
-
-
-class TestComputeDiff:
-    def test_returns_none_when_identical(self):
-        assert compute_diff("same content", "same content") is None
-
-    def test_returns_diff_when_changed(self):
-        result = compute_diff("line1\n", "line1\nline2\n")
-        assert result is not None
-        assert "line2" in result
-
-    def test_diff_format_is_unified(self):
-        result = compute_diff("old\n", "new\n")
-        assert "---" in result
-        assert "+++" in result
+    @patch("check_changelog.requests.get")
+    def test_passes_per_page_param(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: [])
+        get_releases("https://github.com/user/repo", limit=3)
+        params = mock_get.call_args[1]["params"]
+        assert params["per_page"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +179,7 @@ class TestInitDb:
     def test_executes_ddl_and_commits(self):
         conn, cursor = make_conn_mock()
         init_db(conn)
-        assert cursor.execute.call_count == 2  # DDL + ALTER TABLE migration
+        assert cursor.execute.call_count == 3  # DDL + ADD COLUMN migration + DROP COLUMN migration
         conn.commit.assert_called_once()
 
 
@@ -216,24 +201,44 @@ class TestUpsertRepository:
         assert params == ("https://github.com/user/repo",)
 
 
+class TestGetSavedVersions:
+    def test_returns_set_of_versions(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchall.return_value = [("v1.0.0",), ("v1.1.0",)]
+        result = get_saved_versions(conn, 1)
+        assert result == {"v1.0.0", "v1.1.0"}
+
+    def test_returns_empty_set_when_no_entries(self):
+        conn, cursor = make_conn_mock()
+        cursor.fetchall.return_value = []
+        result = get_saved_versions(conn, 1)
+        assert result == set()
+
+
 class TestSaveChangelog:
     def test_inserts_with_version_and_commits(self):
         conn, cursor = make_conn_mock()
         executed_at = datetime.now(tz=timezone.utc)
-        save_changelog(conn, 1, "v1.0.0", "## v1.0\n- init", None, None, executed_at)
+        save_changelog(conn, 1, "v1.0.0", "## v1.0\n- init", None, executed_at)
         cursor.execute.assert_called_once()
         conn.commit.assert_called_once()
         params = cursor.execute.call_args[0][1]
         assert params[0] == 1  # provider_id
         assert params[1] == "v1.0.0"  # version
         assert params[2] == "## v1.0\n- init"  # content
-        assert params[5] == executed_at
+        assert params[4] == executed_at
 
     def test_success_flag_in_sql(self):
         conn, cursor = make_conn_mock()
-        save_changelog(conn, 1, None, "content", None, None, datetime.now(tz=timezone.utc))
+        save_changelog(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
         sql = cursor.execute.call_args[0][0]
         assert "TRUE" in sql
+
+    def test_no_diff_column_in_sql(self):
+        conn, cursor = make_conn_mock()
+        save_changelog(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
+        sql = cursor.execute.call_args[0][0]
+        assert "diff" not in sql.lower()
 
 
 class TestSaveError:
@@ -256,16 +261,16 @@ class TestSaveError:
 class TestCleanupOldChangelogs:
     def test_executes_delete_and_commits(self):
         conn, cursor = make_conn_mock()
-        cleanup_old_changelogs(conn, 1)
+        cleanup_old_changelogs(conn)
         cursor.execute.assert_called_once()
         conn.commit.assert_called_once()
         sql = cursor.execute.call_args[0][0]
         assert "DELETE FROM connector_changelog" in sql
 
-    def test_passes_correct_params(self):
+    def test_uses_retention_days_param(self):
         conn, cursor = make_conn_mock()
-        cleanup_old_changelogs(conn, 7)
+        cleanup_old_changelogs(conn)
         params = cursor.execute.call_args[0][1]
-        assert params[0] == 7  # provider_id for DELETE
-        assert params[1] == 7  # provider_id for subquery
-        assert params[2] == 3  # MAX_CHANGELOGS_PER_REPO
+        from check_changelog import RETENTION_DAYS
+
+        assert params[0] == RETENTION_DAYS

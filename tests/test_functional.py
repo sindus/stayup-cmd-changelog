@@ -7,7 +7,7 @@ Connection is configured via environment variables:
 
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import psycopg2
@@ -127,7 +127,7 @@ class TestSaveChangelogFunctional:
     def test_row_is_persisted_with_version(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
-        save_changelog(db_conn, repo_id, "v1.0.0", "release notes", None, None, executed_at)
+        save_changelog(db_conn, repo_id, "v1.0.0", "release notes", None, executed_at)
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT version, content, success FROM connector_changelog WHERE provider_id = %s", (repo_id,))
@@ -138,7 +138,7 @@ class TestSaveChangelogFunctional:
 
     def test_row_is_persisted_without_version(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
-        save_changelog(db_conn, repo_id, None, "## 1.0.0\n- init", None, None, datetime.now(tz=timezone.utc))
+        save_changelog(db_conn, repo_id, None, "## 1.0.0\n- init", None, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT version, content FROM connector_changelog WHERE provider_id = %s", (repo_id,))
@@ -149,7 +149,7 @@ class TestSaveChangelogFunctional:
     def test_changelog_date_stored(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         changelog_date = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        save_changelog(db_conn, repo_id, None, "content", None, changelog_date, datetime.now(tz=timezone.utc))
+        save_changelog(db_conn, repo_id, None, "content", changelog_date, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT datetime FROM connector_changelog WHERE provider_id = %s", (repo_id,))
@@ -163,30 +163,42 @@ class TestSaveChangelogFunctional:
 
 
 class TestCleanupOldChangelogsFunctional:
-    def test_keeps_only_last_3(self, db_conn):
+    def test_deletes_entries_older_than_retention_days(self, db_conn):
+        repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
+        old_date = datetime.now(tz=timezone.utc) - timedelta(days=20)
+        recent_date = datetime.now(tz=timezone.utc)
+
+        sql = (
+            "INSERT INTO connector_changelog"
+            " (provider_id, version, content, executed_at, success)"
+            " VALUES (%s, %s, %s, %s, TRUE)"
+        )
+        with db_conn.cursor() as cur:
+            cur.execute(sql, (repo_id, "v1.0.0", "old content", old_date))
+            cur.execute(sql, (repo_id, "v2.0.0", "recent content", recent_date))
+        db_conn.commit()
+
+        cleanup_old_changelogs(db_conn)
+
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT version FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            rows = cur.fetchall()
+        versions = [r[0] for r in rows]
+        assert "v1.0.0" not in versions
+        assert "v2.0.0" in versions
+
+    def test_does_nothing_when_all_entries_are_recent(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
         for i in range(5):
-            save_changelog(db_conn, repo_id, f"v1.{i}.0", f"content {i}", None, None, executed_at)
+            save_changelog(db_conn, repo_id, f"v1.{i}.0", f"content {i}", None, executed_at)
 
-        cleanup_old_changelogs(db_conn, repo_id)
-
-        with db_conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
-            count = cur.fetchone()[0]
-        assert count == 3
-
-    def test_does_nothing_when_less_than_3(self, db_conn):
-        repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
-        executed_at = datetime.now(tz=timezone.utc)
-        save_changelog(db_conn, repo_id, "v1.0.0", "content", None, None, executed_at)
-
-        cleanup_old_changelogs(db_conn, repo_id)
+        cleanup_old_changelogs(db_conn)
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
             count = cur.fetchone()[0]
-        assert count == 1
+        assert count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -221,30 +233,32 @@ class TestSaveErrorFunctional:
 
 
 class TestEndToEnd:
-    @patch("check_changelog.get_latest_release")
-    def test_process_repo_first_run_via_release(self, mock_release, db_conn):
-        """First run via release API — stores content with no diff."""
-        mock_release.return_value = ("v1.0.0", "- Initial release", datetime.now(tz=timezone.utc))
+    @patch("check_changelog.get_releases")
+    def test_process_repo_first_run_via_release(self, mock_releases, db_conn):
+        """First run via release API — stores the latest release."""
+        mock_releases.return_value = [("v1.0.0", "- Initial release", datetime.now(tz=timezone.utc))]
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
-            cur.execute("SELECT version, diff, success FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            cur.execute("SELECT version, success FROM connector_changelog WHERE provider_id = %s", (repo_id,))
             row = cur.fetchone()
         assert row[0] == "v1.0.0"
-        assert row[1] is None  # no diff on first run
-        assert row[2] is True
+        assert row[1] is True
 
-    @patch("check_changelog.get_latest_release")
-    def test_process_repo_saves_diff_on_new_release(self, mock_release, db_conn):
-        """New tag — stores a new entry."""
+    @patch("check_changelog.get_releases")
+    def test_process_repo_saves_new_release(self, mock_releases, db_conn):
+        """New tag — stores the new entry."""
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
 
-        mock_release.return_value = ("v1.0.0", "- Initial", executed_at)
+        mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
         process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
 
-        mock_release.return_value = ("v1.1.0", "- New feature", datetime.now(tz=timezone.utc))
+        mock_releases.return_value = [
+            ("v1.1.0", "- New feature", datetime.now(tz=timezone.utc)),
+            ("v1.0.0", "- Initial", executed_at),
+        ]
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
@@ -255,13 +269,13 @@ class TestEndToEnd:
             row = cur.fetchone()
         assert row[0] == "v1.1.0"
 
-    @patch("check_changelog.get_latest_release")
-    def test_process_repo_no_insert_when_same_release(self, mock_release, db_conn):
+    @patch("check_changelog.get_releases")
+    def test_process_repo_no_insert_when_same_release(self, mock_releases, db_conn):
         """Same tag — no new entry is inserted."""
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
 
-        mock_release.return_value = ("v1.0.0", "- Initial", executed_at)
+        mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
         process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
@@ -270,10 +284,33 @@ class TestEndToEnd:
             count = cur.fetchone()[0]
         assert count == 1
 
-    @patch("check_changelog.get_latest_release")
-    def test_process_repo_fallback_to_file(self, mock_release, db_conn, local_git_repo):
+    @patch("check_changelog.get_releases")
+    def test_process_repo_saves_multiple_new_releases_up_to_max(self, mock_releases, db_conn):
+        """Multiple new releases since last run — saves all of them up to MAX_ITERATIONS."""
+        repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
+        executed_at = datetime.now(tz=timezone.utc)
+
+        mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
+        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
+
+        # 3 new releases since last run
+        mock_releases.return_value = [
+            ("v1.3.0", "- v1.3", datetime.now(tz=timezone.utc)),
+            ("v1.2.0", "- v1.2", datetime.now(tz=timezone.utc)),
+            ("v1.1.0", "- v1.1", datetime.now(tz=timezone.utc)),
+            ("v1.0.0", "- Initial", executed_at),
+        ]
+        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE provider_id = %s", (repo_id,))
+            count = cur.fetchone()[0]
+        assert count == 4  # initial + 3 new
+
+    @patch("check_changelog.get_releases")
+    def test_process_repo_fallback_to_file(self, mock_releases, db_conn, local_git_repo):
         """No release — falls back to the changelog file."""
-        mock_release.return_value = None
+        mock_releases.return_value = []
         repo_id = upsert_repository(db_conn, str(local_git_repo))
         process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
 
@@ -283,10 +320,10 @@ class TestEndToEnd:
         assert "1.0.0" in row[0]
         assert row[1] is None  # no version for file-based changelogs
 
-    @patch("check_changelog.get_latest_release")
-    def test_process_repo_logs_error_on_failure(self, mock_release, db_conn):
+    @patch("check_changelog.get_releases")
+    def test_process_repo_logs_error_on_failure(self, mock_releases, db_conn):
         """API error — logged to the log table."""
-        mock_release.side_effect = Exception("API timeout")
+        mock_releases.side_effect = Exception("API timeout")
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
 
