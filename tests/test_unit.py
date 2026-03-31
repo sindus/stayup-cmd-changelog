@@ -6,17 +6,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from check_changelog import (
-    cleanup_old_changelogs,
+    cleanup_old_entries,
     clone_repo,
     find_changelog,
     get_changelog_git_date,
-    get_latest_changelog,
+    get_latest_entry,
     get_releases,
     get_repositories,
     get_saved_versions,
     init_db,
     parse_github_owner_repo,
-    save_changelog,
+    save_entry,
     save_error,
     upsert_repository,
 )
@@ -224,18 +224,18 @@ class TestGetRepositories:
         assert "type = 'changelog'" in sql
 
 
-class TestGetLatestChangelog:
+class TestGetLatestEntry:
     def test_returns_version_and_content_when_found(self):
         conn, cursor = make_conn_mock()
         cursor.fetchone.return_value = ("v1.0.0", "release notes")
-        version, content = get_latest_changelog(conn, 1)
+        version, content = get_latest_entry(conn, 1)
         assert version == "v1.0.0"
         assert content == "release notes"
 
     def test_returns_none_none_when_no_entry(self):
         conn, cursor = make_conn_mock()
         cursor.fetchone.return_value = None
-        version, content = get_latest_changelog(conn, 1)
+        version, content = get_latest_entry(conn, 1)
         assert version is None
         assert content is None
 
@@ -254,28 +254,28 @@ class TestGetSavedVersions:
         assert result == set()
 
 
-class TestSaveChangelog:
+class TestSaveEntry:
     def test_inserts_with_version_and_commits(self):
         conn, cursor = make_conn_mock()
         executed_at = datetime.now(tz=timezone.utc)
-        save_changelog(conn, 1, "v1.0.0", "## v1.0\n- init", None, executed_at)
+        save_entry(conn, 1, "v1.0.0", "## v1.0\n- init", None, executed_at)
         cursor.execute.assert_called_once()
         conn.commit.assert_called_once()
         params = cursor.execute.call_args[0][1]
-        assert params[0] == 1  # provider_id
+        assert params[0] == 1  # repository_id
         assert params[1] == "v1.0.0"  # version
         assert params[2] == "## v1.0\n- init"  # content
         assert params[4] == executed_at
 
     def test_success_flag_in_sql(self):
         conn, cursor = make_conn_mock()
-        save_changelog(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
+        save_entry(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
         sql = cursor.execute.call_args[0][0]
         assert "TRUE" in sql
 
     def test_no_diff_column_in_sql(self):
         conn, cursor = make_conn_mock()
-        save_changelog(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
+        save_entry(conn, 1, None, "content", None, datetime.now(tz=timezone.utc))
         sql = cursor.execute.call_args[0][0]
         assert "diff" not in sql.lower()
 
@@ -297,19 +297,17 @@ class TestSaveError:
         assert params[0] is None
 
 
-class TestCleanupOldChangelogs:
+class TestCleanupOldEntries:
     def test_executes_delete_and_commits(self):
         conn, cursor = make_conn_mock()
-        cleanup_old_changelogs(conn)
+        cleanup_old_entries(conn, 1, 15)
         cursor.execute.assert_called_once()
         conn.commit.assert_called_once()
         sql = cursor.execute.call_args[0][0]
         assert "DELETE FROM connector_changelog" in sql
 
-    def test_uses_retention_days_param(self):
+    def test_uses_repository_id_and_retention_days(self):
         conn, cursor = make_conn_mock()
-        cleanup_old_changelogs(conn)
+        cleanup_old_entries(conn, 7, 30)
         params = cursor.execute.call_args[0][1]
-        from check_changelog import RETENTION_DAYS
-
-        assert params[0] == RETENTION_DAYS
+        assert params == (7, 30)

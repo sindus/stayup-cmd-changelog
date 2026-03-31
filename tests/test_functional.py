@@ -14,11 +14,11 @@ import psycopg2
 import pytest
 
 from check_changelog import (
-    cleanup_old_changelogs,
+    cleanup_old_entries,
     clone_repo,
     init_db,
-    process_repo,
-    save_changelog,
+    process_repository,
+    save_entry,
     save_error,
     upsert_repository,
 )
@@ -123,11 +123,11 @@ class TestUpsertRepositoryFunctional:
 # ---------------------------------------------------------------------------
 
 
-class TestSaveChangelogFunctional:
+class TestSaveEntryFunctional:
     def test_row_is_persisted_with_version(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
-        save_changelog(db_conn, repo_id, "v1.0.0", "release notes", None, executed_at)
+        save_entry(db_conn, repo_id, "v1.0.0", "release notes", None, executed_at)
 
         with db_conn.cursor() as cur:
             cur.execute(
@@ -141,7 +141,7 @@ class TestSaveChangelogFunctional:
 
     def test_row_is_persisted_without_version(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
-        save_changelog(db_conn, repo_id, None, "## 1.0.0\n- init", None, datetime.now(tz=timezone.utc))
+        save_entry(db_conn, repo_id, None, "## 1.0.0\n- init", None, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT version, content FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -152,7 +152,7 @@ class TestSaveChangelogFunctional:
     def test_changelog_date_stored(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         changelog_date = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
-        save_changelog(db_conn, repo_id, None, "content", changelog_date, datetime.now(tz=timezone.utc))
+        save_entry(db_conn, repo_id, None, "content", changelog_date, datetime.now(tz=timezone.utc))
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT datetime FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -165,7 +165,7 @@ class TestSaveChangelogFunctional:
 # ---------------------------------------------------------------------------
 
 
-class TestCleanupOldChangelogsFunctional:
+class TestCleanupOldEntriesFunctional:
     def test_deletes_entries_older_than_retention_days(self, db_conn):
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         old_date = datetime.now(tz=timezone.utc) - timedelta(days=20)
@@ -181,7 +181,7 @@ class TestCleanupOldChangelogsFunctional:
             cur.execute(sql, (repo_id, "v2.0.0", "recent content", recent_date))
         db_conn.commit()
 
-        cleanup_old_changelogs(db_conn)
+        cleanup_old_entries(db_conn, repo_id, 15)
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT version FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -194,9 +194,9 @@ class TestCleanupOldChangelogsFunctional:
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
         for i in range(5):
-            save_changelog(db_conn, repo_id, f"v1.{i}.0", f"content {i}", None, executed_at)
+            save_entry(db_conn, repo_id, f"v1.{i}.0", f"content {i}", None, executed_at)
 
-        cleanup_old_changelogs(db_conn)
+        cleanup_old_entries(db_conn, repo_id, 15)
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -241,7 +241,7 @@ class TestEndToEnd:
         """First run via release API — stores the latest release."""
         mock_releases.return_value = [("v1.0.0", "- Initial release", datetime.now(tz=timezone.utc))]
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT version, success FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -256,13 +256,13 @@ class TestEndToEnd:
         executed_at = datetime.now(tz=timezone.utc)
 
         mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", executed_at, {})
 
         mock_releases.return_value = [
             ("v1.1.0", "- New feature", datetime.now(tz=timezone.utc)),
             ("v1.0.0", "- Initial", executed_at),
         ]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute(
@@ -279,8 +279,8 @@ class TestEndToEnd:
         executed_at = datetime.now(tz=timezone.utc)
 
         mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", executed_at, {})
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -294,7 +294,7 @@ class TestEndToEnd:
         executed_at = datetime.now(tz=timezone.utc)
 
         mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", executed_at, {})
 
         # 3 new releases since last run (under the cap of 5)
         mock_releases.return_value = [
@@ -303,7 +303,7 @@ class TestEndToEnd:
             ("v1.1.0", "- v1.1", datetime.now(tz=timezone.utc)),
             ("v1.0.0", "- Initial", executed_at),
         ]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -312,31 +312,30 @@ class TestEndToEnd:
 
     @patch("check_changelog.get_releases")
     def test_process_repo_capped_at_max_iterations(self, mock_releases, db_conn):
-        """More than MAX_ITERATIONS new releases — only MAX_ITERATIONS are saved."""
-        from check_changelog import MAX_ITERATIONS
-
+        """More than max_iterations new releases — only max_iterations are saved (default 5)."""
+        max_iterations = 5
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
         executed_at = datetime.now(tz=timezone.utc)
 
         mock_releases.return_value = [("v1.0.0", "- Initial", executed_at)]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", executed_at)
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", executed_at, {})
 
-        # More new releases than MAX_ITERATIONS
-        new_releases = [(f"v2.{i}.0", f"- v2.{i}", datetime.now(tz=timezone.utc)) for i in range(MAX_ITERATIONS + 2)]
+        # More new releases than max_iterations
+        new_releases = [(f"v2.{i}.0", f"- v2.{i}", datetime.now(tz=timezone.utc)) for i in range(max_iterations + 2)]
         mock_releases.return_value = new_releases + [("v1.0.0", "- Initial", executed_at)]
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))
             count = cur.fetchone()[0]
-        assert count == 1 + MAX_ITERATIONS  # initial + cap
+        assert count == 1 + max_iterations  # initial + cap
 
     @patch("check_changelog.get_releases")
     def test_process_repo_fallback_to_file(self, mock_releases, db_conn, local_git_repo):
         """No release — falls back to the changelog file."""
         mock_releases.return_value = []
         repo_id = upsert_repository(db_conn, str(local_git_repo))
-        process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT content, version FROM connector_changelog WHERE repository_id = %s", (repo_id,))
@@ -349,7 +348,7 @@ class TestEndToEnd:
         """API error — logged to the log table."""
         mock_releases.side_effect = Exception("API timeout")
         repo_id = upsert_repository(db_conn, "https://github.com/user/repo")
-        process_repo(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, "https://github.com/user/repo", datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT error FROM log WHERE repository_id = %s", (repo_id,))
@@ -363,8 +362,8 @@ class TestEndToEnd:
         repo_id = upsert_repository(db_conn, str(local_git_repo))
         executed_at = datetime.now(tz=timezone.utc)
 
-        process_repo(db_conn, repo_id, str(local_git_repo), executed_at)
-        process_repo(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc))
+        process_repository(db_conn, repo_id, str(local_git_repo), executed_at, {})
+        process_repository(db_conn, repo_id, str(local_git_repo), datetime.now(tz=timezone.utc), {})
 
         with db_conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM connector_changelog WHERE repository_id = %s", (repo_id,))

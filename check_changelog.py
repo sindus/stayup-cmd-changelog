@@ -5,7 +5,7 @@ Stayup — monitors GitHub releases and stores changelogs in PostgreSQL.
 For each tracked repository, the script fetches recent GitHub releases.
 If no releases exist, it falls back to cloning the repo and reading a
 changelog file. New content is stored only when something has changed
-since the last run. Entries older than RETENTION_DAYS are deleted daily.
+since the last run. Entries older than config["retention_days"] are deleted each run.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS repository (
 
 CREATE TABLE IF NOT EXISTS connector_changelog (
     id              SERIAL PRIMARY KEY,
-    repository_id     INTEGER NOT NULL REFERENCES repository(id),
+    repository_id   INTEGER NOT NULL REFERENCES repository(id),
     version         TEXT,
     content         TEXT NOT NULL,
     datetime        TIMESTAMPTZ,
@@ -62,12 +62,6 @@ CREATE TABLE IF NOT EXISTS log (
     executed_at     TIMESTAMPTZ NOT NULL
 );
 """
-
-# Maximum number of new changelog entries saved per repository per run.
-MAX_ITERATIONS = 5
-
-# Number of days after which changelog entries are deleted.
-RETENTION_DAYS = 15
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +88,7 @@ def get_db_conn() -> psycopg2.extensions.connection:
 
 
 def init_db(conn: psycopg2.extensions.connection) -> None:
-    """Create tables if they don't exist and apply pending migrations."""
+    """Create tables if they don't exist."""
     with conn.cursor() as cur:
         cur.execute(DDL)
     conn.commit()
@@ -105,8 +99,8 @@ def upsert_repository(conn: psycopg2.extensions.connection, url: str) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO repository (url)
-            VALUES (%s)
+            INSERT INTO repository (url, type)
+            VALUES (%s, 'changelog')
             ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url
             RETURNING id
             """,
@@ -117,14 +111,14 @@ def upsert_repository(conn: psycopg2.extensions.connection, url: str) -> int:
     return row[0]
 
 
-def get_repositories(conn: psycopg2.extensions.connection) -> list[tuple[int, str]]:
-    """Return all tracked repositories of type 'changelog' as a list of (id, url) tuples."""
+def get_repositories(conn: psycopg2.extensions.connection) -> list[tuple[int, str, dict]]:
+    """Return all tracked repositories of type 'changelog' as a list of (id, url, config) tuples."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id, url FROM repository WHERE type = 'changelog' ORDER BY id")
+        cur.execute("SELECT id, url, config FROM repository WHERE type = 'changelog' ORDER BY id")
         return cur.fetchall()
 
 
-def get_latest_changelog(conn: psycopg2.extensions.connection, repository_id: int) -> tuple[str | None, str | None]:
+def get_latest_entry(conn: psycopg2.extensions.connection, repository_id: int) -> tuple[str | None, str | None]:
     """Return (version, content) of the most recent successful changelog entry.
 
     Returns (None, None) if no entry exists yet.
@@ -156,7 +150,7 @@ def get_saved_versions(conn: psycopg2.extensions.connection, repository_id: int)
         return {row[0] for row in cur.fetchall()}
 
 
-def save_changelog(
+def save_entry(
     conn: psycopg2.extensions.connection,
     repository_id: int,
     version: str | None,
@@ -176,12 +170,12 @@ def save_changelog(
     conn.commit()
 
 
-def cleanup_old_changelogs(conn: psycopg2.extensions.connection) -> None:
-    """Delete all changelog entries older than RETENTION_DAYS days."""
+def cleanup_old_entries(conn: psycopg2.extensions.connection, repository_id: int, retention_days: int) -> None:
+    """Delete changelog entries for a repository older than retention_days days."""
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM connector_changelog WHERE executed_at < NOW() - %s * INTERVAL '1 day'",
-            (RETENTION_DAYS,),
+            "DELETE FROM connector_changelog WHERE repository_id = %s AND executed_at < NOW() - %s * INTERVAL '1 day'",
+            (repository_id, retention_days),
         )
     conn.commit()
 
@@ -218,7 +212,7 @@ def parse_github_owner_repo(url: str) -> tuple[str, str]:
     return parts[-2], parts[-1]
 
 
-def get_releases(repo_url: str, limit: int = MAX_ITERATIONS) -> list[tuple[str, str, datetime]]:
+def get_releases(repo_url: str, limit: int = 5) -> list[tuple[str, str, datetime]]:
     """Fetch the most recent GitHub releases for a repository (newest first).
 
     Returns an empty list if the repository has no releases or does not exist.
@@ -322,50 +316,53 @@ def get_changelog_from_repo(repo_url: str) -> tuple[str | None, str, datetime | 
 # ---------------------------------------------------------------------------
 
 
-def process_repo(conn: psycopg2.extensions.connection, repo_id: int, repo_url: str, executed_at: datetime) -> None:
+def process_repository(
+    conn: psycopg2.extensions.connection, repository_id: int, repository_url: str, executed_at: datetime, config: dict
+) -> None:
     """Fetch the latest release(s) (or changelog file) for one repository and persist new entries.
 
     Release-based repos:
     - If no previous entry exists, the latest release is stored as the initial snapshot.
     - Otherwise, iterates through recent GitHub releases (newest first) and saves every
       release not already in the database, stopping when a known version is found.
-      At most MAX_ITERATIONS new entries are saved per run.
+      At most config["max_iterations"] (default 5) new entries are saved per run.
 
     File-based repos (no releases):
     - Saves the changelog file content whenever it differs from the last saved entry.
 
     Any exception is caught, logged to the `log` table, and printed to stderr.
     """
+    max_iterations = config.get("max_iterations", 5)
     try:
-        releases = get_releases(repo_url)
+        releases = get_releases(repository_url, limit=max_iterations)
 
         if releases:
-            saved_versions = get_saved_versions(conn, repo_id)
+            saved_versions = get_saved_versions(conn, repository_id)
 
             if not saved_versions:
                 # First run: save only the latest release.
                 version, content, changelog_date = releases[0]
-                save_changelog(conn, repo_id, version, content, changelog_date, executed_at)
+                save_entry(conn, repository_id, version, content, changelog_date, executed_at)
             else:
                 count = 0
                 for version, content, changelog_date in releases:
-                    if count >= MAX_ITERATIONS:
+                    if count >= max_iterations:
                         break
                     if version in saved_versions:
                         break
-                    save_changelog(conn, repo_id, version, content, changelog_date, executed_at)
+                    save_entry(conn, repository_id, version, content, changelog_date, executed_at)
                     count += 1
         else:
-            version, content, changelog_date = get_changelog_from_repo(repo_url)
-            prev_version, prev_content = get_latest_changelog(conn, repo_id)
+            version, content, changelog_date = get_changelog_from_repo(repository_url)
+            prev_version, prev_content = get_latest_entry(conn, repository_id)
             if prev_content is None:
-                save_changelog(conn, repo_id, version, content, changelog_date, executed_at)
+                save_entry(conn, repository_id, version, content, changelog_date, executed_at)
             elif content != prev_content:
-                save_changelog(conn, repo_id, version, content, changelog_date, executed_at)
+                save_entry(conn, repository_id, version, content, changelog_date, executed_at)
 
     except Exception as e:
-        save_error(conn, repo_id, str(e), executed_at)
-        print(f"[{repo_url}] Error: {e}", file=sys.stderr)
+        save_error(conn, repository_id, str(e), executed_at)
+        print(f"[{repository_url}] Error: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -388,16 +385,15 @@ def main() -> None:
             return
 
         executed_at = datetime.now(tz=timezone.utc)
-        repos = get_repositories(conn)
+        repositories = get_repositories(conn)
 
-        if not repos:
+        if not repositories:
             print("No repositories tracked. Use --add <url> to add one.")
             return
 
-        for repo_id, repo_url in repos:
-            process_repo(conn, repo_id, repo_url, executed_at)
-
-        cleanup_old_changelogs(conn)
+        for repository_id, repository_url, config in repositories:
+            process_repository(conn, repository_id, repository_url, executed_at, config)
+            cleanup_old_entries(conn, repository_id, config.get("retention_days", 15))
 
     finally:
         conn.close()
