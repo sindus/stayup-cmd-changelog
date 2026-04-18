@@ -206,9 +206,9 @@ class TestUpsertRepository:
 class TestGetRepositories:
     def test_returns_list_of_tuples(self):
         conn, cursor = make_conn_mock()
-        cursor.fetchall.return_value = [(1, "https://github.com/a/b"), (2, "https://github.com/c/d")]
+        cursor.fetchall.return_value = [(1, "https://github.com/a/b", {"max_entries": 3}), (2, "https://github.com/c/d", {})]
         result = get_repositories(conn)
-        assert result == [(1, "https://github.com/a/b"), (2, "https://github.com/c/d")]
+        assert result == [(1, "https://github.com/a/b", {"max_entries": 3}), (2, "https://github.com/c/d", {})]
 
     def test_returns_empty_list_when_no_repos(self):
         conn, cursor = make_conn_mock()
