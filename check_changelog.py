@@ -117,10 +117,7 @@ def get_repositories(conn: psycopg2.extensions.connection) -> list[tuple[int, st
     with conn.cursor() as cur:
         cur.execute("SELECT id, url, config FROM repository WHERE type = 'changelog' ORDER BY id")
         rows = cur.fetchall()
-        return [
-            (row[0], row[1], json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {}))
-            for row in rows
-        ]
+        return [(row[0], row[1], json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {})) for row in rows]
 
 
 def get_latest_entry(conn: psycopg2.extensions.connection, repository_id: int) -> tuple[str | None, str | None]:
