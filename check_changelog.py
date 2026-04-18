@@ -11,6 +11,7 @@ since the last run. Entries older than config["retention_days"] are deleted each
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -115,7 +116,11 @@ def get_repositories(conn: psycopg2.extensions.connection) -> list[tuple[int, st
     """Return all tracked repositories of type 'changelog' as a list of (id, url, config) tuples."""
     with conn.cursor() as cur:
         cur.execute("SELECT id, url, config FROM repository WHERE type = 'changelog' ORDER BY id")
-        return cur.fetchall()
+        rows = cur.fetchall()
+        return [
+            (row[0], row[1], json.loads(row[2]) if isinstance(row[2], str) else (row[2] or {}))
+            for row in rows
+        ]
 
 
 def get_latest_entry(conn: psycopg2.extensions.connection, repository_id: int) -> tuple[str | None, str | None]:
